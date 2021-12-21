@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -112,7 +115,7 @@ func roundRobin(w http.ResponseWriter, r *http.Request) {
 
 	peer := serverPool.GetNextPeer()
 	if peer != nil {
-		logger.Debug("distribute the request to ", peer.URL)
+		logger.Debug("Distribute the request to ", peer.URL)
 		peer.ReverseProxy.ServeHTTP(w, r)
 		return
 	}
@@ -142,21 +145,25 @@ func healthCheck() {
 var serverPool ServerPool
 
 func main() {
-	urls := [...]string{
-		"http://localhost:3000",
-		"http://localhost:3001",
-		"http://localhost:3002",
-	}
+	var endbacks string
+	var port int
+	flag.StringVar(&endbacks, "backends", "", "The endback list separated by commas")
+	flag.IntVar(&port, "port", 8000, "Load balancer's port")
+	flag.Parse()
 
-	for _, ur := range urls {
-		serverUrl, err := url.Parse(ur)
+	endbackList := strings.Split(endbacks, ",")
+	if endbackList[0] == "" {
+		logger.Fatal("At least one endback")
+	}
+	for _, endback := range endbackList {
+		endback, err := url.Parse(endback)
 		if err != nil {
 			logger.Fatal(err)
 		}
 
-		proxy := httputil.NewSingleHostReverseProxy(serverUrl)
+		proxy := httputil.NewSingleHostReverseProxy(endback)
 		proxy.ErrorHandler = func(rw http.ResponseWriter, r *http.Request, e error) {
-			logger.Errorf("[%s] %s\n", serverUrl.Host, e.Error())
+			logger.Errorf("[%s] %s\n", endback.Host, e.Error())
 			retries := GetRetryFromContext(r)
 			if retries < 3 {
 				time.After(10 * time.Millisecond)
@@ -165,23 +172,23 @@ func main() {
 				return
 			}
 
-			serverPool.MarkBackendStatus(serverUrl, false)
+			serverPool.MarkBackendStatus(endback, false)
 			attempts := GetAttemptsFromContext(r)
 			ctx := context.WithValue(r.Context(), Attempts, attempts+1)
 			roundRobin(rw, r.WithContext(ctx))
 		}
 
 		serverPool.AddBackend(&Backend{
-			URL:          serverUrl,
+			URL:          endback,
 			Alive:        true,
 			ReverseProxy: proxy,
 		})
 
-		logger.Info("Configured server: ", serverUrl)
+		logger.Info("Configured server: ", endback)
 	}
 
 	server := http.Server{
-		Addr:    ":8000",
+		Addr:    fmt.Sprintf(":%d", port),
 		Handler: http.HandlerFunc(roundRobin),
 	}
 
